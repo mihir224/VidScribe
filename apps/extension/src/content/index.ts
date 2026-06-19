@@ -42,6 +42,13 @@ type CaptureFramesResult = {
   message: string;
 };
 
+type YtClientConfig = {
+  apiKey?: string;
+  clientVersion?: string;
+  hl?: string;
+  gl?: string;
+};
+
 const READY_KEY = "__VIDSCRIBE_CONTENT_READY__";
 const MAX_VISUAL_CANDIDATES = 10;
 const VISUAL_CUE_PATTERN =
@@ -95,6 +102,16 @@ function readTextRenderer(renderer: any): string | undefined {
   return undefined;
 }
 
+function safeJsonString(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+
+  try {
+    return JSON.parse(`"${raw}"`) as string;
+  } catch {
+    return raw;
+  }
+}
+
 function extractBalancedJson(source: string, startIndex: number): string | undefined {
   const firstBrace = source.indexOf("{", startIndex);
   if (firstBrace === -1) return undefined;
@@ -134,7 +151,7 @@ function extractBalancedJson(source: string, startIndex: number): string | undef
   return undefined;
 }
 
-function getPlayerResponse(): any | undefined {
+function getPlayerResponseFromScripts(): any | undefined {
   for (const script of Array.from(document.scripts)) {
     const text = script.textContent ?? "";
     const markerIndex = text.indexOf("ytInitialPlayerResponse");
@@ -151,6 +168,90 @@ function getPlayerResponse(): any | undefined {
   }
 
   return undefined;
+}
+
+function getYtClientConfigFromScripts(): YtClientConfig {
+  const config: YtClientConfig = {};
+
+  for (const script of Array.from(document.scripts)) {
+    const text = script.textContent ?? "";
+    if (!text.includes("INNERTUBE_API_KEY")) continue;
+
+    config.apiKey ??= safeJsonString(
+      /"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+    );
+    config.clientVersion ??= safeJsonString(
+      /"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+    );
+    config.hl ??= safeJsonString(/"HL"\s*:\s*"([^"]+)"/.exec(text)?.[1]);
+    config.gl ??= safeJsonString(/"GL"\s*:\s*"([^"]+)"/.exec(text)?.[1]);
+
+    if (config.apiKey && config.clientVersion) {
+      break;
+    }
+  }
+
+  return config;
+}
+
+async function fetchPlayerResponseFromInnertube(
+  videoId: string
+): Promise<any | undefined> {
+  const clientConfig = getYtClientConfigFromScripts();
+  if (!clientConfig.apiKey) {
+    console.warn("[VidScribe] Could not find YouTube Innertube API key");
+    return undefined;
+  }
+
+  const endpoint = new URL("/youtubei/v1/player", window.location.origin);
+  endpoint.searchParams.set("key", clientConfig.apiKey);
+  endpoint.searchParams.set("prettyPrint", "false");
+
+  const response = await fetch(endpoint.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: "WEB",
+          clientVersion: clientConfig.clientVersion ?? "2.20260618.01.00",
+          hl: clientConfig.hl ?? "en",
+          gl: clientConfig.gl ?? "US"
+        }
+      },
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true
+    })
+  });
+
+  if (!response.ok) {
+    console.warn(
+      `[VidScribe] YouTube player request failed with ${response.status}`
+    );
+    return undefined;
+  }
+
+  return response.json();
+}
+
+async function getPlayerResponse(videoId: string): Promise<any | undefined> {
+  const scriptedPlayerResponse = getPlayerResponseFromScripts();
+  const scriptedVideoId = scriptedPlayerResponse?.videoDetails?.videoId;
+  const scriptedTracks = getCaptionTracks(scriptedPlayerResponse);
+
+  if (scriptedVideoId === videoId && scriptedTracks.length > 0) {
+    return scriptedPlayerResponse;
+  }
+
+  const innertubePlayerResponse = await fetchPlayerResponseFromInnertube(videoId);
+  if (innertubePlayerResponse) {
+    return innertubePlayerResponse;
+  }
+
+  return scriptedVideoId === videoId ? scriptedPlayerResponse : undefined;
 }
 
 function getCaptionTracks(playerResponse: any): any[] {
@@ -189,16 +290,7 @@ function normalizeTrack(track: any): CaptionTrack {
   };
 }
 
-async function fetchCaptions(track: any): Promise<CaptionCue[]> {
-  const url = new URL(track.baseUrl);
-  url.searchParams.set("fmt", "json3");
-
-  const response = await fetch(url.toString());
-  if (!response.ok) {
-    throw new Error(`Caption request failed with ${response.status}`);
-  }
-
-  const payload = await response.json();
+function parseJson3Captions(payload: any): CaptionCue[] {
   const cues: CaptionCue[] = [];
 
   for (const event of payload.events ?? []) {
@@ -220,6 +312,227 @@ async function fetchCaptions(track: any): Promise<CaptionCue[]> {
   }
 
   return cues;
+}
+
+function normalizeCaptionText(text: string): string {
+  return text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function textFromXmlCaptionNode(node: Element): string {
+  const segments = Array.from(node.querySelectorAll("s"))
+    .map((segment) => segment.textContent ?? "")
+    .filter((segment) => segment.trim().length > 0);
+
+  return normalizeCaptionText(
+    segments.length > 0 ? segments.join(" ") : node.textContent ?? ""
+  );
+}
+
+function parseXmlCaptions(xmlText: string): CaptionCue[] {
+  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+  if (doc.querySelector("parsererror")) {
+    throw new Error("Caption XML parser error");
+  }
+
+  const textNodes = Array.from(doc.querySelectorAll("text"));
+  const legacyCues = textNodes
+    .map((node) => {
+      const start = Number(node.getAttribute("start") ?? 0);
+      const duration = Number(node.getAttribute("dur") ?? 2);
+      const text = normalizeCaptionText(node.textContent ?? "");
+
+      return {
+        start,
+        end: start + Math.max(0.25, duration),
+        text
+      };
+    })
+    .filter((cue) => cue.text.length > 0);
+
+  if (legacyCues.length > 0) {
+    return legacyCues;
+  }
+
+  const paragraphNodes = Array.from(doc.querySelectorAll("p"));
+  return paragraphNodes
+    .map((node) => {
+      const start = Number(node.getAttribute("t") ?? 0) / 1000;
+      const duration = Number(node.getAttribute("d") ?? 2000) / 1000;
+      const text = textFromXmlCaptionNode(node);
+
+      return {
+        start,
+        end: start + Math.max(0.25, duration),
+        text
+      };
+    })
+    .filter((cue) => cue.text.length > 0);
+}
+
+function parseVttTimestamp(timestamp: string): number {
+  const parts = timestamp.trim().split(":");
+  const secondsPart = parts.pop() ?? "0";
+  const minutesPart = parts.pop() ?? "0";
+  const hoursPart = parts.pop() ?? "0";
+
+  return (
+    Number(hoursPart) * 3600 +
+    Number(minutesPart) * 60 +
+    Number(secondsPart.replace(",", "."))
+  );
+}
+
+function parseVttCaptions(vttText: string): CaptionCue[] {
+  const cues: CaptionCue[] = [];
+  const blocks = vttText.replace(/^WEBVTT.*$/m, "").split(/\n\s*\n/g);
+
+  for (const block of blocks) {
+    const lines = block
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const timingIndex = lines.findIndex((line) => line.includes("-->"));
+    if (timingIndex === -1) continue;
+
+    const timingLine = lines[timingIndex];
+    if (!timingLine) continue;
+
+    const [startRaw, endRaw] = timingLine.split("-->").map((part) => part.trim());
+    if (!startRaw || !endRaw) continue;
+
+    const cueText = normalizeCaptionText(lines.slice(timingIndex + 1).join(" "));
+    if (!cueText) continue;
+
+    cues.push({
+      start: parseVttTimestamp(startRaw.split(/\s+/)[0] ?? "0"),
+      end: parseVttTimestamp(endRaw.split(/\s+/)[0] ?? "0"),
+      text: cueText
+    });
+  }
+
+  return cues;
+}
+
+function trackLabel(track: any): string {
+  const label = readTextRenderer(track?.name) ?? track?.languageCode ?? "unknown";
+  const kind = track?.kind ? `/${track.kind}` : "";
+  return `${label}${kind}`;
+}
+
+function orderedCaptionTracks(tracks: any[]): any[] {
+  const preferred = chooseCaptionTrack(tracks);
+  const seen = new Set<string>();
+  const ordered = preferred ? [preferred, ...tracks] : tracks;
+
+  return ordered.filter((track) => {
+    if (!track?.baseUrl || seen.has(track.baseUrl)) {
+      return false;
+    }
+
+    seen.add(track.baseUrl);
+    return true;
+  });
+}
+
+function parseCaptionBody(body: string, format: string): CaptionCue[] {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    throw new Error(`Caption ${format} response was empty`);
+  }
+
+  if (format === "provided") {
+    if (trimmed.startsWith("{")) {
+      return parseJson3Captions(JSON.parse(trimmed));
+    }
+    if (trimmed.startsWith("WEBVTT")) {
+      return parseVttCaptions(trimmed);
+    }
+    return parseXmlCaptions(trimmed);
+  }
+
+  if (format === "json3") {
+    return parseJson3Captions(JSON.parse(trimmed));
+  }
+  if (format === "vtt") {
+    return parseVttCaptions(trimmed);
+  }
+
+  return parseXmlCaptions(trimmed);
+}
+
+async function fetchCaptionText(track: any, format?: string): Promise<string> {
+  const url = new URL(track.baseUrl);
+  if (format) {
+    url.searchParams.set("fmt", format);
+  }
+
+  const response = await fetch(url.toString(), {
+    credentials: "include"
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Caption ${format ?? "provided"} request failed with ${response.status}`
+    );
+  }
+
+  return response.text();
+}
+
+async function fetchCaptionsFromTrack(track: any): Promise<CaptionCue[]> {
+  const attempts = ["provided", "json3", "srv3", "srv1", "vtt"];
+  const errors: string[] = [];
+
+  for (const attempt of attempts) {
+    try {
+      const body = await fetchCaptionText(
+        track,
+        attempt === "provided" ? undefined : attempt
+      );
+      const cues = parseCaptionBody(body, attempt);
+      console.info(
+        `[VidScribe] Parsed ${cues.length} caption cue(s) from ${attempt} for ${trackLabel(track)}`
+      );
+
+      if (cues.length > 0) {
+        return cues;
+      }
+
+      errors.push(`${attempt}: parsed 0 cues`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${attempt}: ${message}`);
+      console.warn(
+        `[VidScribe] ${attempt} captions failed for ${trackLabel(track)}`,
+        error
+      );
+    }
+  }
+
+  throw new Error(`${trackLabel(track)} attempts failed: ${errors.join("; ")}`);
+}
+
+async function fetchCaptionsFromTracks(
+  tracks: any[]
+): Promise<{ captions: CaptionCue[]; track: any }> {
+  const errors: string[] = [];
+
+  for (const track of orderedCaptionTracks(tracks)) {
+    try {
+      console.info("[VidScribe] Trying caption track", {
+        languageCode: track?.languageCode,
+        name: readTextRenderer(track?.name),
+        kind: track?.kind,
+        hasBaseUrl: Boolean(track?.baseUrl)
+      });
+      const captions = await fetchCaptionsFromTrack(track);
+      return { captions, track };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(message);
+    }
+  }
+
+  throw new Error(`No usable caption text. Tracks: ${errors.join(" | ")}`);
 }
 
 function chooseVisualCandidates(cues: CaptionCue[], duration: number): number[] {
@@ -246,9 +559,7 @@ function chooseVisualCandidates(cues: CaptionCue[], duration: number): number[] 
 
 async function extractCurrentVideo(): Promise<ExtractResult> {
   const videoElement = getVideoElement();
-  const playerResponse = getPlayerResponse();
-  const videoDetails = playerResponse?.videoDetails;
-  const videoId = videoDetails?.videoId ?? getVideoIdFromUrl();
+  const videoId = getVideoIdFromUrl();
 
   if (!videoElement || !videoId) {
     return {
@@ -258,10 +569,13 @@ async function extractCurrentVideo(): Promise<ExtractResult> {
     };
   }
 
+  const playerResponse = await getPlayerResponse(videoId);
+  const videoDetails = playerResponse?.videoDetails;
   const tracks = getCaptionTracks(playerResponse);
-  const selectedTrack = chooseCaptionTrack(tracks);
-
-  if (!selectedTrack) {
+  console.info(
+    `[VidScribe] Found ${tracks.length} caption track(s) for video ${videoId}`
+  );
+  if (tracks.length === 0) {
     return {
       ok: false,
       reason: "NO_CAPTIONS",
@@ -270,7 +584,7 @@ async function extractCurrentVideo(): Promise<ExtractResult> {
   }
 
   try {
-    const captions = await fetchCaptions(selectedTrack);
+    const { captions, track: selectedTrack } = await fetchCaptionsFromTracks(tracks);
 
     if (captions.length === 0) {
       return {
@@ -299,7 +613,8 @@ async function extractCurrentVideo(): Promise<ExtractResult> {
       captionTrack: normalizeTrack(selectedTrack),
       visualCandidateTimestamps: chooseVisualCandidates(captions, duration)
     };
-  } catch {
+  } catch (error) {
+    console.warn("[VidScribe] Caption extraction failed", error);
     return {
       ok: false,
       reason: "CAPTION_FETCH_FAILED",
