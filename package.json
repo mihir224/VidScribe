@@ -1,0 +1,24 @@
+{
+  "name": "vidscribe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @vidscribe/shared && npm run build -w @vidscribe/server && npm run build -w @vidscribe/extension",
+    "test": "npm run test -w @vidscribe/shared && npm run test -w @vidscribe/server && npm run test -w @vidscribe/extension",
+    "dev:server": "npm run build -w @vidscribe/shared && npm run dev -w @vidscribe/server",
+    "dev:extension": "npm run dev -w @vidscribe/extension",
+    "build:server": "npm run build -w @vidscribe/server",
+    "build:extension": "npm run build -w @vidscribe/extension"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

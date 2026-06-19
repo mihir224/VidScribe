@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "VidScribe",
+  "version": "0.1.0",
+  "description": "Generate timestamped study notes from YouTube captions and visuals.",
+  "minimum_chrome_version": "116",
+  "action": {
+    "default_title": "Open VidScribe"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "scripting", "sidePanel"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*",
+    "http://localhost:8787/*",
+    "http://127.0.0.1:8787/*"
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
