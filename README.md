@@ -111,3 +111,6 @@ aws sts get-caller-identity
 ```
 
 Your AWS principal needs permission for `bedrock:InvokeModel` on the configured model or inference profile.
+
+<img width="1454" height="703" alt="image" src="https://github.com/user-attachments/assets/789b7ba1-219c-43f7-b273-9119fcc185a1" />
+
