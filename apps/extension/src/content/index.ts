@@ -45,11 +45,19 @@ type CaptureFramesResult = {
 type YtClientConfig = {
   apiKey?: string;
   clientVersion?: string;
+  clientName?: string;
+  visitorData?: string;
+  sessionIndex?: string;
   hl?: string;
   gl?: string;
 };
 
 const READY_KEY = "__VIDSCRIBE_CONTENT_READY__";
+const ANDROID_INNERTUBE_CLIENT = {
+  clientName: "ANDROID",
+  clientVersion: "20.10.38",
+  clientNameHeader: "3"
+} as const;
 const MAX_VISUAL_CANDIDATES = 10;
 const VISUAL_CUE_PATTERN =
   /\b(as shown|as you can see|look at|look here|on screen|shown here|diagram|slide|chart|graph|figure|code|example|visual|screenshot)\b/i;
@@ -170,6 +178,25 @@ function getPlayerResponseFromScripts(): any | undefined {
   return undefined;
 }
 
+function getInitialDataFromScripts(): any | undefined {
+  for (const script of Array.from(document.scripts)) {
+    const text = script.textContent ?? "";
+    const markerIndex = text.indexOf("ytInitialData");
+    if (markerIndex === -1) continue;
+
+    const jsonText = extractBalancedJson(text, markerIndex);
+    if (!jsonText) continue;
+
+    try {
+      return JSON.parse(jsonText);
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
 function getYtClientConfigFromScripts(): YtClientConfig {
   const config: YtClientConfig = {};
 
@@ -183,6 +210,16 @@ function getYtClientConfigFromScripts(): YtClientConfig {
     config.clientVersion ??= safeJsonString(
       /"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"/.exec(text)?.[1]
     );
+    config.clientName ??= safeJsonString(
+      /"INNERTUBE_CONTEXT_CLIENT_NAME"\s*:\s*(?:"([^"]+)"|(\d+))/.exec(text)?.[1] ??
+        /"INNERTUBE_CONTEXT_CLIENT_NAME"\s*:\s*(?:"([^"]+)"|(\d+))/.exec(text)?.[2]
+    );
+    config.visitorData ??= safeJsonString(
+      /"VISITOR_DATA"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+    );
+    config.sessionIndex ??= safeJsonString(
+      /"SESSION_INDEX"\s*:\s*"([^"]+)"/.exec(text)?.[1]
+    );
     config.hl ??= safeJsonString(/"HL"\s*:\s*"([^"]+)"/.exec(text)?.[1]);
     config.gl ??= safeJsonString(/"GL"\s*:\s*"([^"]+)"/.exec(text)?.[1]);
 
@@ -192,6 +229,97 @@ function getYtClientConfigFromScripts(): YtClientConfig {
   }
 
   return config;
+}
+
+function getInnertubeHeaders(clientConfig: YtClientConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-YouTube-Client-Name": clientConfig.clientName ?? "1",
+    "X-YouTube-Client-Version":
+      clientConfig.clientVersion ?? "2.20260626.01.00"
+  };
+
+  if (clientConfig.visitorData) {
+    headers["X-Goog-Visitor-Id"] = clientConfig.visitorData;
+  }
+
+  if (clientConfig.sessionIndex) {
+    headers["X-Goog-AuthUser"] = clientConfig.sessionIndex;
+  }
+
+  return headers;
+}
+
+function getInnertubeContext(clientConfig: YtClientConfig) {
+  return {
+    client: {
+      clientName: "WEB",
+      clientVersion: clientConfig.clientVersion ?? "2.20260626.01.00",
+      hl: clientConfig.hl ?? "en",
+      gl: clientConfig.gl ?? "US",
+      visitorData: clientConfig.visitorData
+    },
+    user: {
+      lockedSafetyMode: false
+    },
+    request: {
+      useSsl: true,
+      internalExperimentFlags: [],
+      consistencyTokenJars: []
+    }
+  };
+}
+
+async function fetchCaptionTracksFromAndroidInnertube(
+  videoId: string
+): Promise<any[]> {
+  const clientConfig = getYtClientConfigFromScripts();
+  if (!clientConfig.apiKey) {
+    console.warn("[VidScribe] Could not find YouTube Innertube API key for ANDROID client");
+    return [];
+  }
+
+  const endpoint = new URL("/youtubei/v1/player", window.location.origin);
+  endpoint.searchParams.set("key", clientConfig.apiKey);
+  endpoint.searchParams.set("prettyPrint", "false");
+
+  const response = await fetch(endpoint.toString(), {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "X-YouTube-Client-Name": ANDROID_INNERTUBE_CLIENT.clientNameHeader,
+      "X-YouTube-Client-Version": ANDROID_INNERTUBE_CLIENT.clientVersion,
+      "User-Agent": `com.google.android.youtube/${ANDROID_INNERTUBE_CLIENT.clientVersion} (Linux; U; Android 14) gzip`
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: ANDROID_INNERTUBE_CLIENT.clientName,
+          clientVersion: ANDROID_INNERTUBE_CLIENT.clientVersion,
+          hl: clientConfig.hl ?? "en",
+          gl: clientConfig.gl ?? "US"
+        }
+      },
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true
+    })
+  });
+
+  if (!response.ok) {
+    console.warn(
+      `[VidScribe] ANDROID player request failed with ${response.status}`
+    );
+    return [];
+  }
+
+  const payload = await response.json();
+  const tracks = getCaptionTracks(payload);
+  console.info(
+    `[VidScribe] ANDROID Innertube returned ${tracks.length} caption track(s)`
+  );
+  return tracks;
 }
 
 async function fetchPlayerResponseFromInnertube(
@@ -209,18 +337,10 @@ async function fetchPlayerResponseFromInnertube(
 
   const response = await fetch(endpoint.toString(), {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    credentials: "include",
+    headers: getInnertubeHeaders(clientConfig),
     body: JSON.stringify({
-      context: {
-        client: {
-          clientName: "WEB",
-          clientVersion: clientConfig.clientVersion ?? "2.20260618.01.00",
-          hl: clientConfig.hl ?? "en",
-          gl: clientConfig.gl ?? "US"
-        }
-      },
+      context: getInnertubeContext(clientConfig),
       videoId,
       contentCheckOk: true,
       racyCheckOk: true
@@ -312,6 +432,10 @@ function parseJson3Captions(payload: any): CaptionCue[] {
   }
 
   return cues;
+}
+
+function textFromRenderer(renderer: any): string {
+  return normalizeCaptionText(readTextRenderer(renderer) ?? "");
 }
 
 function normalizeCaptionText(text: string): string {
@@ -462,20 +586,79 @@ function parseCaptionBody(body: string, format: string): CaptionCue[] {
 
 async function fetchCaptionText(track: any, format?: string): Promise<string> {
   const url = new URL(track.baseUrl);
+  // ANDROID timedtext URLs already include fmt=srv3; strip before overriding.
+  url.searchParams.delete("fmt");
   if (format) {
     url.searchParams.set("fmt", format);
   }
 
-  const response = await fetch(url.toString(), {
-    credentials: "include"
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Caption ${format ?? "provided"} request failed with ${response.status}`
+  const attemptLabel = format ?? "provided";
+  try {
+    const directBody = await fetchCaptionTextFromPage(url, attemptLabel);
+    if (directBody.trim()) {
+      return directBody;
+    }
+
+    console.warn(
+      `[VidScribe] ${attemptLabel} page fetch returned empty; trying extension fetch`
+    );
+  } catch (error) {
+    console.warn(
+      `[VidScribe] ${attemptLabel} page fetch failed; trying extension fetch`,
+      error
     );
   }
 
-  return response.text();
+  return fetchCaptionTextFromExtension(url, attemptLabel);
+}
+
+async function fetchCaptionTextFromPage(
+  url: URL,
+  attemptLabel: string
+): Promise<string> {
+  const response = await fetch(url.toString(), {
+    credentials: "include",
+    headers: {
+      Accept: "application/json,text/xml,text/vtt,text/plain,*/*"
+    }
+  });
+  const body = await response.text();
+
+  console.info("[VidScribe] Caption page fetch", {
+    attempt: attemptLabel,
+    status: response.status,
+    length: body.length
+  });
+
+  if (!response.ok) {
+    throw new Error(`Caption ${attemptLabel} request failed with ${response.status}`);
+  }
+
+  return body;
+}
+
+async function fetchCaptionTextFromExtension(
+  url: URL,
+  attemptLabel: string
+): Promise<string> {
+  const response = await chrome.runtime.sendMessage({
+    type: "VIDSCRIBE_FETCH_YOUTUBE_CAPTION",
+    url: url.toString()
+  });
+
+  const body = String(response?.body ?? "");
+  console.info("[VidScribe] Caption extension fetch", {
+    attempt: attemptLabel,
+    status: response?.status,
+    ok: Boolean(response?.ok),
+    length: body.length
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error ?? `Caption ${attemptLabel} extension fetch failed`);
+  }
+
+  return body;
 }
 
 async function fetchCaptionsFromTrack(track: any): Promise<CaptionCue[]> {
@@ -535,6 +718,170 @@ async function fetchCaptionsFromTracks(
   throw new Error(`No usable caption text. Tracks: ${errors.join(" | ")}`);
 }
 
+function findTranscriptParams(value: any, seen = new WeakSet<object>()): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  if (seen.has(value)) {
+    return undefined;
+  }
+  seen.add(value);
+
+  const params = value?.getTranscriptEndpoint?.params;
+  if (typeof params === "string" && params.length > 0) {
+    return params;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findTranscriptParams(item, seen);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  for (const item of Object.values(value)) {
+    const found = findTranscriptParams(item, seen);
+    if (found) return found;
+  }
+
+  return undefined;
+}
+
+function collectRendererObjects(
+  value: any,
+  rendererName: string,
+  output: any[] = [],
+  seen = new WeakSet<object>()
+): any[] {
+  if (!value || typeof value !== "object") {
+    return output;
+  }
+
+  if (seen.has(value)) {
+    return output;
+  }
+  seen.add(value);
+
+  if (value[rendererName]) {
+    output.push(value[rendererName]);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectRendererObjects(item, rendererName, output, seen);
+    }
+    return output;
+  }
+
+  for (const item of Object.values(value)) {
+    collectRendererObjects(item, rendererName, output, seen);
+  }
+
+  return output;
+}
+
+function parseTranscriptResponse(payload: any): CaptionCue[] {
+  const cueRenderers = collectRendererObjects(payload, "transcriptCueRenderer");
+  const cueCaptions = cueRenderers
+    .map((renderer) => {
+      const start = Number(renderer.startOffsetMs ?? renderer.startMs ?? 0) / 1000;
+      const duration = Number(renderer.durationMs ?? 2000) / 1000;
+      const text = textFromRenderer(renderer.cue ?? renderer.snippet);
+
+      return {
+        start,
+        end: start + Math.max(0.25, duration),
+        text
+      };
+    })
+    .filter((cue) => cue.text.length > 0);
+
+  if (cueCaptions.length > 0) {
+    return cueCaptions;
+  }
+
+  const segmentRenderers = collectRendererObjects(payload, "transcriptSegmentRenderer");
+  return segmentRenderers
+    .map((renderer) => {
+      const start = Number(renderer.startMs ?? 0) / 1000;
+      const endMs = Number(renderer.endMs ?? 0);
+      const durationMs = Number(renderer.durationMs ?? 0);
+      const end =
+        endMs > 0
+          ? endMs / 1000
+          : start + Math.max(0.25, (durationMs || 2000) / 1000);
+      const text = textFromRenderer(renderer.snippet ?? renderer.cue);
+
+      return {
+        start,
+        end,
+        text
+      };
+    })
+    .filter((cue) => cue.text.length > 0);
+}
+
+async function fetchTranscriptPanelCaptions(
+  videoId: string
+): Promise<{ captions: CaptionCue[]; track: any } | undefined> {
+  const initialData = getInitialDataFromScripts();
+  const params = findTranscriptParams(initialData);
+  const clientConfig = getYtClientConfigFromScripts();
+
+  if (!params || !clientConfig.apiKey) {
+    console.warn("[VidScribe] Transcript panel fallback unavailable", {
+      hasParams: Boolean(params),
+      hasApiKey: Boolean(clientConfig.apiKey)
+    });
+    return undefined;
+  }
+
+  const endpoint = new URL("/youtubei/v1/get_transcript", window.location.origin);
+  endpoint.searchParams.set("key", clientConfig.apiKey);
+  endpoint.searchParams.set("prettyPrint", "false");
+
+  const response = await fetch(endpoint.toString(), {
+    method: "POST",
+    credentials: "include",
+    headers: getInnertubeHeaders(clientConfig),
+    body: JSON.stringify({
+      context: getInnertubeContext(clientConfig),
+      params
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.warn(
+      `[VidScribe] Transcript panel request failed with ${response.status}`,
+      errorText.slice(0, 500)
+    );
+    return undefined;
+  }
+
+  const payload = await response.json();
+  const captions = parseTranscriptResponse(payload);
+  console.info(
+    `[VidScribe] Parsed ${captions.length} caption cue(s) from transcript panel`
+  );
+
+  if (captions.length === 0) {
+    return undefined;
+  }
+
+  return {
+    captions,
+    track: {
+      languageCode: "unknown",
+      name: { simpleText: "YouTube transcript" },
+      kind: "transcript-panel",
+      baseUrl: undefined
+    }
+  };
+}
+
 function chooseVisualCandidates(cues: CaptionCue[], duration: number): number[] {
   const semantic = cues
     .filter((cue) => VISUAL_CUE_PATTERN.test(cue.text))
@@ -571,20 +918,49 @@ async function extractCurrentVideo(): Promise<ExtractResult> {
 
   const playerResponse = await getPlayerResponse(videoId);
   const videoDetails = playerResponse?.videoDetails;
-  const tracks = getCaptionTracks(playerResponse);
+
+  // WEB caption track URLs often include exp=xpe and require a PoToken, returning
+  // empty 200 responses. ANDROID Innertube URLs do not have that restriction.
+  let tracks = await fetchCaptionTracksFromAndroidInnertube(videoId);
+  if (tracks.length === 0) {
+    tracks = getCaptionTracks(playerResponse);
+    console.warn(
+      "[VidScribe] Falling back to page caption tracks (may require PoToken)"
+    );
+  }
   console.info(
     `[VidScribe] Found ${tracks.length} caption track(s) for video ${videoId}`
   );
-  if (tracks.length === 0) {
-    return {
-      ok: false,
-      reason: "NO_CAPTIONS",
-      message: "This video has no captions. Audio transcription is not part of the MVP yet."
-    };
-  }
-
   try {
-    const { captions, track: selectedTrack } = await fetchCaptionsFromTracks(tracks);
+    let extraction:
+      | {
+          captions: CaptionCue[];
+          track: any;
+        }
+      | undefined;
+
+    if (tracks.length > 0) {
+      try {
+        extraction = await fetchCaptionsFromTracks(tracks);
+      } catch (error) {
+        console.warn(
+          "[VidScribe] Caption tracks failed; trying transcript panel fallback",
+          error
+        );
+      }
+    }
+
+    extraction ??= await fetchTranscriptPanelCaptions(videoId);
+
+    if (!extraction) {
+      return {
+        ok: false,
+        reason: "NO_CAPTIONS",
+        message: "This video has no captions. Audio transcription is not part of the MVP yet."
+      };
+    }
+
+    const { captions, track: selectedTrack } = extraction;
 
     if (captions.length === 0) {
       return {
