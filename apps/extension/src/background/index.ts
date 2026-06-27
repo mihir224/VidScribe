@@ -41,6 +41,19 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "VIDSCRIBE_FETCH_YOUTUBE_CAPTION") {
+    fetchYouTubeCaptionText(String(message.url ?? ""))
+      .then((result) => sendResponse(result))
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : "Caption fetch failed"
+        });
+      });
+
+    return true;
+  }
+
   if (message?.type !== "VIDSCRIBE_CAPTURE_VISIBLE_TAB") {
     return undefined;
   }
@@ -75,3 +88,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return true;
 });
+
+async function fetchYouTubeCaptionText(url: string): Promise<{
+  ok: boolean;
+  status?: number;
+  body?: string;
+  error?: string;
+}> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return {
+      ok: false,
+      error: "Invalid caption URL"
+    };
+  }
+
+  const isYouTubeCaptionUrl =
+    (parsed.hostname === "www.youtube.com" || parsed.hostname === "youtube.com") &&
+    parsed.pathname === "/api/timedtext";
+
+  if (!isYouTubeCaptionUrl) {
+    return {
+      ok: false,
+      error: "Refusing to fetch a non-YouTube caption URL"
+    };
+  }
+
+  const response = await fetch(parsed.toString(), {
+    credentials: "include",
+    headers: {
+      Accept: "application/json,text/xml,text/vtt,text/plain,*/*"
+    }
+  });
+  const body = await response.text();
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body,
+    error: response.ok ? undefined : `Caption request failed with ${response.status}`
+  };
+}
