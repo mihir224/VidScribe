@@ -17,7 +17,7 @@ import {
   View
 } from "react-native";
 import type { NoteDocument, NoteJob, NoteSection } from "@vidscribe/shared";
-import { getNotesJob, startYouTubeNotesJob } from "../src/api";
+import { getNotesJob, startYouTubeNotesJob, API_BASE_URL } from "../src/api";
 import { formatTimestamp, markdownForDocument } from "../src/notes";
 import {
   loadHistory,
@@ -81,6 +81,7 @@ export default function HomeScreen() {
   const [url, setUrl] = useState("");
   const [uiState, setUiState] = useState<UiState>("idle");
   const [message, setMessage] = useState("Paste or share a YouTube URL.");
+  const [debugInfo, setDebugInfo] = useState<string | null>(null);
   const [job, setJob] = useState<NoteJob>();
   const [document, setDocument] = useState<NoteDocument>();
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -147,6 +148,7 @@ export default function HomeScreen() {
     pollCancelledRef.current = false;
     setDocument(undefined);
     setJob(undefined);
+    setDebugInfo(null);
     setUiState("starting");
     setMessage("Starting notes job.");
 
@@ -174,7 +176,13 @@ export default function HomeScreen() {
       }
     } catch (error) {
       setUiState("error");
-      setMessage(error instanceof Error ? error.message : "Notes generation failed.");
+      const errMsg = error instanceof Error ? error.message : "Notes generation failed.";
+      const errType = error instanceof Error ? error.constructor.name : typeof error;
+      const errStack = error instanceof Error ? (error.stack ?? "") : "";
+      setMessage(errMsg);
+      setDebugInfo(
+        `URL: ${API_BASE_URL}\nType: ${errType}\nMessage: ${errMsg}\n\n${errStack}`
+      );
     }
   }
 
@@ -267,6 +275,13 @@ export default function HomeScreen() {
         <View style={[styles.status, styles[`status_${uiState}`]]}>
           <Text style={styles.statusText}>{statusLabel}</Text>
         </View>
+
+        {debugInfo ? (
+          <View style={styles.debugPanel}>
+            <Text style={styles.debugTitle}>Debug Info</Text>
+            <Text style={styles.debugText} selectable>{debugInfo}</Text>
+          </View>
+        ) : null}
 
         {document ? (
           <View style={styles.notesPanel}>
@@ -562,5 +577,23 @@ const styles = StyleSheet.create({
     color: "#6d6256",
     fontSize: 13,
     fontWeight: "600"
+  },
+  debugPanel: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 8,
+    padding: 12,
+    gap: 6
+  },
+  debugTitle: {
+    color: "#ff9500",
+    fontSize: 13,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
+  debugText: {
+    color: "#e0e0e0",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    fontSize: 11,
+    lineHeight: 16
   }
 });
