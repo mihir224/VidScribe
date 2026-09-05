@@ -1,0 +1,108 @@
+import cors from "@fastify/cors";
+import Fastify from "fastify";
+import {
+  generateNotesRequestSchema,
+  noteJobSchema,
+  youtubeNotesRequestSchema,
+  type GenerateNotesRequest,
+  type NoteJob
+} from "@vidscribe/shared";
+import { ZodError } from "zod";
+import { NotesJobStore } from "./jobs.js";
+import {
+  extractYouTubeNotesInput,
+  YouTubeExtractionError
+} from "./youtube.js";
+
+type NotesJobService = {
+  create(request: GenerateNotesRequest): NoteJob;
+  get(jobId: string): NoteJob | undefined;
+};
+
+type BuildAppOptions = {
+  jobs?: NotesJobService;
+  extractYouTube?: (
+    url: string,
+    options?: { preferredLanguage?: string }
+  ) => Promise<GenerateNotesRequest>;
+};
+
+export async function buildApp(options: BuildAppOptions = {}) {
+  const app = Fastify({
+    logger: true
+  });
+  const jobs = options.jobs ?? new NotesJobStore();
+  const extractYouTube = options.extractYouTube ?? extractYouTubeNotesInput;
+
+  await app.register(cors, {
+    origin: true
+  });
+
+  app.get("/health", async () => ({
+    ok: true,
+    service: "vidscribe-server"
+  }));
+
+  app.post("/api/notes/jobs", async (request, reply) => {
+    try {
+      const body = generateNotesRequestSchema.parse(request.body);
+      const job = jobs.create(body);
+      return reply.code(202).send(noteJobSchema.parse(job));
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "Invalid request body",
+          issues: error.issues
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/notes/youtube/jobs", async (request, reply) => {
+    try {
+      const body = youtubeNotesRequestSchema.parse(request.body);
+      const notesInput = await extractYouTube(body.url, {
+        preferredLanguage: body.preferredLanguage
+      });
+      const job = jobs.create(notesInput);
+      return reply.code(202).send(noteJobSchema.parse(job));
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "Invalid request body",
+          issues: error.issues
+        });
+      }
+
+      if (error instanceof YouTubeExtractionError) {
+        const statusCode = error.code === "INVALID_URL" ? 400 : 422;
+        return reply.code(statusCode).send({
+          error: error.message,
+          code: error.code
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/notes/jobs/:jobId", async (request, reply) => {
+    const params = request.params as { jobId?: string };
+    const jobId = params.jobId;
+
+    if (!jobId) {
+      return reply.code(400).send({ error: "Missing jobId" });
+    }
+
+    const job = jobs.get(jobId);
+    if (!job) {
+      return reply.code(404).send({ error: "Job not found" });
+    }
+
+    return noteJobSchema.parse(job);
+  });
+
+  return app;
+}

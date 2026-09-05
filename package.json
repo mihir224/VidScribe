@@ -8,12 +8,14 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @vidscribe/shared && npm run build -w @vidscribe/server && npm run build -w @vidscribe/extension",
-    "test": "npm run test -w @vidscribe/shared && npm run test -w @vidscribe/server && npm run test -w @vidscribe/extension",
+    "build": "npm run build -w @vidscribe/shared && npm run build -w @vidscribe/server && npm run build -w @vidscribe/extension && npm run build -w @vidscribe/mobile",
+    "test": "npm run build -w @vidscribe/shared && npm run test -w @vidscribe/shared && npm run test -w @vidscribe/server && npm run test -w @vidscribe/extension && npm run test -w @vidscribe/mobile",
     "dev:server": "npm run build -w @vidscribe/shared && npm run dev -w @vidscribe/server",
     "dev:extension": "npm run dev -w @vidscribe/extension",
+    "dev:mobile": "npm run dev -w @vidscribe/mobile",
     "build:server": "npm run build -w @vidscribe/server",
-    "build:extension": "npm run build -w @vidscribe/extension"
+    "build:extension": "npm run build -w @vidscribe/extension",
+    "build:mobile": "npm run build -w @vidscribe/mobile"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

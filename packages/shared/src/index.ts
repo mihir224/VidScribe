@@ -60,6 +60,18 @@ export const generateNotesRequestSchema = z.object({
   frames: z.array(visualFrameSchema).default([])
 });
 
+export const youtubeNotesRequestSchema = z.object({
+  url: z.string().url(),
+  preferredLanguage: z.string().min(1).optional()
+});
+
+export const youtubeExtractionErrorCodeSchema = z.enum([
+  "INVALID_URL",
+  "VIDEO_UNAVAILABLE",
+  "NO_CAPTIONS",
+  "CAPTION_FETCH_FAILED"
+]);
+
 export const jobStatusSchema = z.enum([
   "queued",
   "running",
@@ -95,6 +107,10 @@ export type VisualFrame = z.infer<typeof visualFrameSchema>;
 export type NoteSection = z.infer<typeof noteSectionSchema>;
 export type NoteDocument = z.infer<typeof noteDocumentSchema>;
 export type GenerateNotesRequest = z.infer<typeof generateNotesRequestSchema>;
+export type YouTubeNotesRequest = z.infer<typeof youtubeNotesRequestSchema>;
+export type YouTubeExtractionErrorCode = z.infer<
+  typeof youtubeExtractionErrorCodeSchema
+>;
 export type JobStatus = z.infer<typeof jobStatusSchema>;
 export type JobProgress = z.infer<typeof jobProgressSchema>;
 export type NoteJob = z.infer<typeof noteJobSchema>;
