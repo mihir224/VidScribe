@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { GenerateNotesRequest, NoteJob } from "@vidscribe/shared";
 import { buildApp } from "../app.js";
 import {
+  extractYouTubeNotesInput,
   parseJson3Captions,
   parseVttCaptions,
   parseXmlCaptions,
@@ -118,5 +119,73 @@ describe("youtube notes route", () => {
     expect(createdRequests).toHaveLength(1);
     expect(createdRequests[0]?.captions[0]?.text).toBe("Mock caption");
     await app.close();
+  });
+});
+
+describe("extractYouTubeNotesInput", () => {
+  it("uses Android Innertube caption tracks before page tracks", async () => {
+    const calls: string[] = [];
+    const fetchImpl = async (input: string | URL | Request) => {
+      const url = input.toString();
+      calls.push(url);
+
+      if (url.includes("/watch")) {
+        return new Response(
+          [
+            '"INNERTUBE_API_KEY":"test-key",',
+            '"INNERTUBE_CLIENT_VERSION":"2.test",',
+            '"HL":"en",',
+            '"GL":"US",',
+            'ytInitialPlayerResponse = {"videoDetails":{"videoId":"abc123","title":"Page title","lengthSeconds":"10"},"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://example.com/page-caption","languageCode":"en"}]}}};'
+          ].join("")
+        );
+      }
+
+      if (url.includes("/youtubei/v1/player")) {
+        return new Response(
+          JSON.stringify({
+            captions: {
+              playerCaptionsTracklistRenderer: {
+                captionTracks: [
+                  {
+                    baseUrl: "https://example.com/android-caption",
+                    languageCode: "hi",
+                    kind: "asr",
+                    name: { simpleText: "Hindi auto" }
+                  }
+                ]
+              }
+            }
+          })
+        );
+      }
+
+      if (url.startsWith("https://example.com/android-caption")) {
+        return new Response(
+          JSON.stringify({
+            events: [
+              {
+                tStartMs: 0,
+                dDurationMs: 1000,
+                segs: [{ utf8: "Android caption text" }]
+              }
+            ]
+          })
+        );
+      }
+
+      return new Response("", { status: 404 });
+    };
+
+    const result = await extractYouTubeNotesInput(
+      "https://youtu.be/abc123",
+      { fetchImpl: fetchImpl as typeof fetch }
+    );
+
+    expect(result.captions[0]?.text).toBe("Android caption text");
+    expect(result.captionTrack?.languageCode).toBe("hi");
+    expect(calls.some((url) => url.startsWith("https://example.com/page-caption"))).toBe(
+      false
+    );
   });
 });

@@ -30,6 +30,11 @@ type RawCaptionTrack = {
   name?: unknown;
 };
 
+const ANDROID_INNERTUBE_CLIENT = {
+  clientName: "ANDROID",
+  clientVersion: "20.10.38",
+  clientNameHeader: "3"
+} as const;
 const WATCH_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
   "User-Agent":
@@ -475,6 +480,44 @@ async function fetchInnertubePlayerResponse(
   return response.json();
 }
 
+async function fetchAndroidInnertubeCaptionTracks(
+  fetchImpl: FetchLike,
+  videoId: string,
+  clientConfig: YtClientConfig
+): Promise<RawCaptionTrack[]> {
+  if (!clientConfig.apiKey) return [];
+
+  const endpoint = new URL("https://www.youtube.com/youtubei/v1/player");
+  endpoint.searchParams.set("key", clientConfig.apiKey);
+  endpoint.searchParams.set("prettyPrint", "false");
+
+  const response = await fetchImpl(endpoint.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-YouTube-Client-Name": ANDROID_INNERTUBE_CLIENT.clientNameHeader,
+      "X-YouTube-Client-Version": ANDROID_INNERTUBE_CLIENT.clientVersion,
+      "User-Agent": `com.google.android.youtube/${ANDROID_INNERTUBE_CLIENT.clientVersion} (Linux; U; Android 14) gzip`
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: ANDROID_INNERTUBE_CLIENT.clientName,
+          clientVersion: ANDROID_INNERTUBE_CLIENT.clientVersion,
+          hl: clientConfig.hl ?? "en",
+          gl: clientConfig.gl ?? "US"
+        }
+      },
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true
+    })
+  });
+
+  if (!response.ok) return [];
+  return getCaptionTracks(await response.json());
+}
+
 function getTitleFromHtml(html: string): string | undefined {
   const rawTitle =
     /<meta\s+property="og:title"\s+content="([^"]+)"/i.exec(html)?.[1] ??
@@ -508,12 +551,17 @@ export async function extractYouTubeNotesInput(
   const html = await watchResponse.text();
   const clientConfig = extractClientConfig(html);
   const scriptedPlayerResponse = extractInitialJson(html, "ytInitialPlayerResponse");
+  const androidTracks = await fetchAndroidInnertubeCaptionTracks(
+    fetchImpl,
+    videoId,
+    clientConfig
+  );
   const innertubePlayerResponse =
-    getCaptionTracks(scriptedPlayerResponse).length > 0
+    androidTracks.length > 0
       ? undefined
       : await fetchInnertubePlayerResponse(fetchImpl, videoId, clientConfig);
   const playerResponse = innertubePlayerResponse ?? scriptedPlayerResponse;
-  const tracks = getCaptionTracks(playerResponse);
+  const tracks = androidTracks.length > 0 ? androidTracks : getCaptionTracks(playerResponse);
 
   if (tracks.length === 0) {
     throw new YouTubeExtractionError(
