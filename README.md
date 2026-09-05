@@ -2,7 +2,7 @@
 
 VidScribe generates structured, timestamped study notes from YouTube videos. It currently has a Chrome MV3 extension, an Expo React Native mobile app, a Fastify backend, and shared TypeScript/Zod contracts. The backend chunks captions, calls AWS Bedrock, and exposes async note-generation jobs that both clients can poll.
 
-The project is captions-first. It supports manual and auto-generated captions where YouTube exposes usable caption tracks. Audio transcription is intentionally out of scope for the current MVP.
+<img width="1454" height="703" alt="image" src="https://github.com/user-attachments/assets/789b7ba1-219c-43f7-b273-9119fcc185a1" />
 
 ## What Is In This Repo
 
@@ -265,5 +265,3 @@ Your AWS principal needs permission for `bedrock:InvokeModel` on the configured 
 - For Chrome caption issues, inspect console lines prefixed with `[VidScribe]`.
 - Common useful signals include caption track count, attempted caption format, empty caption response, and transcript fallback errors.
 - If mobile cannot reach the backend on a real device, use `HOST=0.0.0.0` for the server and `EXPO_PUBLIC_API_BASE_URL=http://YOUR_LAN_IP:8787` for Expo.
-
-<img width="1454" height="703" alt="image" src="https://github.com/user-attachments/assets/789b7ba1-219c-43f7-b273-9119fcc185a1" />
