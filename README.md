@@ -265,3 +265,5 @@ Your AWS principal needs permission for `bedrock:InvokeModel` on the configured 
 - For Chrome caption issues, inspect console lines prefixed with `[VidScribe]`.
 - Common useful signals include caption track count, attempted caption format, empty caption response, and transcript fallback errors.
 - If mobile cannot reach the backend on a real device, use `HOST=0.0.0.0` for the server and `EXPO_PUBLIC_API_BASE_URL=http://YOUR_LAN_IP:8787` for Expo.
+
+<img width="1454" height="703" alt="image" src="https://github.com/user-attachments/assets/789b7ba1-219c-43f7-b273-9119fcc185a1" />
